@@ -1,0 +1,10 @@
+services:
+  redfish-emu:
+    build: .
+    ports:
+      - "8009:8009"
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/redfish.db
+    restart: unless-stopped
