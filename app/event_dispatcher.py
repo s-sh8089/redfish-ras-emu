@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import requests
 
 from app import config
+from app.sse_manager import sse_manager
 
 
 def dispatch_event(
@@ -35,8 +36,24 @@ def dispatch_event(
     finally:
         conn.close()
 
-    if not subs:
-        return
+    sse_payload = {
+        "@odata.type": "#Event.v1_7_0.Event",
+        "Id": event_id,
+        "Name": "Event Array",
+        "Context": "",
+        "Events": [
+            {
+                "EventType": event_type,
+                "EventId": event_id,
+                "EventTimestamp": timestamp,
+                "Severity": severity,
+                "Message": message,
+                "MessageId": message_id,
+                "OriginOfCondition": {"@odata.id": origin_of_condition},
+            }
+        ],
+    }
+    sse_manager.broadcast(sse_payload)
 
     for sub in subs:
         if sub["event_types"]:

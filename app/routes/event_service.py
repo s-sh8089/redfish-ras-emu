@@ -1,16 +1,19 @@
+import asyncio
 import json
 import sqlite3
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app import config
+from app.auth import unauthorized_response, validate_token
 from app.database import get_db
 from app.event_dispatcher import dispatch_event
-from app.helpers import bad_request_response, created_response, no_content_response, not_found_response
+from app.helpers import bad_request_response, created_response, no_content_response, not_found_response, odata_pagination
+from app.sse_manager import sse_manager
 
 router = APIRouter()
 
@@ -46,17 +49,26 @@ def event_service():
 
 
 @router.get("/redfish/v1/EventService/Subscriptions")
-def subscriptions(db: sqlite3.Connection = Depends(get_db)):
-    rows = db.execute("SELECT id FROM event_subscriptions ORDER BY id").fetchall()
-    return {
+def subscriptions(
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
+    total = db.execute("SELECT COUNT(*) FROM event_subscriptions").fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{BASE}/Subscriptions")
+    rows = db.execute(
+        "SELECT id FROM event_subscriptions ORDER BY id LIMIT ? OFFSET ?", (limit, offset)
+    ).fetchall()
+    result = {
         "@odata.id": f"{BASE}/Subscriptions",
         "@odata.type": "#EventDestinationCollection.EventDestinationCollection",
         "Name": "Event Subscription Collection",
-        "Members@odata.count": len(rows),
-        "Members": [
-            {"@odata.id": f"{BASE}/Subscriptions/{r['id']}"} for r in rows
-        ],
+        "Members@odata.count": total,
+        "Members": [{"@odata.id": f"{BASE}/Subscriptions/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 class SubscriptionCreate(BaseModel):
@@ -128,6 +140,35 @@ def submit_test_event(body: SubmitTestEventBody, background_tasks: BackgroundTas
         body.Severity,
     )
     return JSONResponse(status_code=200, content={"Message": "Test event submitted successfully"})
+
+
+@router.get("/redfish/v1/EventService/SSE")
+async def event_service_sse(request: Request, token: Optional[str] = Query(None)):
+    auth_token = request.headers.get("X-Auth-Token") or token
+    if not auth_token or not validate_token(auth_token):
+        return unauthorized_response()
+
+    async def generate():
+        async with sse_manager.subscribe() as queue:
+            yield "retry: 5000\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _subscription_resource(row) -> dict:

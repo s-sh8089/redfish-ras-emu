@@ -19,6 +19,7 @@ def service_root():
         "Managers": {"@odata.id": "/redfish/v1/Managers"},
         "EventService": {"@odata.id": "/redfish/v1/EventService"},
         "SessionService": {"@odata.id": "/redfish/v1/SessionService"},
+        "Tasks": {"@odata.id": "/redfish/v1/TaskService"},
         "Links": {
             "Sessions": {"@odata.id": "/redfish/v1/SessionService/Sessions"}
         },

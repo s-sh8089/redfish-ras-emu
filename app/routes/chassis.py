@@ -2,12 +2,18 @@ import json
 import sqlite3
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from pydantic import BaseModel
 
 from app.database import get_db
 from app.event_dispatcher import check_threshold, dispatch_event
-from app.helpers import not_found_response
+from app.helpers import (
+    check_etag,
+    compute_etag,
+    not_found_response,
+    odata_pagination,
+    precondition_failed_response,
+)
 
 router = APIRouter()
 
@@ -72,24 +78,35 @@ def _chassis_sensor_resource(row, chassis_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 @router.get("/redfish/v1/Chassis")
-def chassis_collection(db: sqlite3.Connection = Depends(get_db)):
-    rows = db.execute("SELECT id FROM chassis ORDER BY id").fetchall()
-    return {
+def chassis_collection(
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
+    total = db.execute("SELECT COUNT(*) FROM chassis").fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, "/redfish/v1/Chassis")
+    rows = db.execute("SELECT id FROM chassis ORDER BY id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    result = {
         "@odata.id": "/redfish/v1/Chassis",
         "@odata.type": "#ChassisCollection.ChassisCollection",
         "@odata.context": "/redfish/v1/$metadata#ChassisCollection.ChassisCollection",
         "Name": "Chassis Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"/redfish/v1/Chassis/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/Chassis/{chassis_id}")
-def chassis(chassis_id: str, db: sqlite3.Connection = Depends(get_db)):
+def chassis(chassis_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute("SELECT * FROM chassis WHERE id=?", (chassis_id,)).fetchone()
     if not row:
         return not_found_response(f"Chassis {chassis_id}")
-    return _chassis_resource(row)
+    resource = _chassis_resource(row)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class ChassisPatch(BaseModel):
@@ -97,10 +114,18 @@ class ChassisPatch(BaseModel):
 
 
 @router.patch("/redfish/v1/Chassis/{chassis_id}")
-def patch_chassis(chassis_id: str, body: ChassisPatch, db: sqlite3.Connection = Depends(get_db)):
+def patch_chassis(
+    chassis_id: str,
+    body: ChassisPatch,
+    request: Request,
+    response: Response,
+    db: sqlite3.Connection = Depends(get_db),
+):
     row = db.execute("SELECT * FROM chassis WHERE id=?", (chassis_id,)).fetchone()
     if not row:
         return not_found_response(f"Chassis {chassis_id}")
+    if not check_etag(request.headers.get("If-Match"), compute_etag(_chassis_resource(row))):
+        return precondition_failed_response()
     if body.Status:
         state = body.Status.get("State", row["status_state"])
         health = body.Status.get("Health", row["status_health"])
@@ -110,38 +135,51 @@ def patch_chassis(chassis_id: str, body: ChassisPatch, db: sqlite3.Connection = 
         )
         db.commit()
     row = db.execute("SELECT * FROM chassis WHERE id=?", (chassis_id,)).fetchone()
-    return _chassis_resource(row)
+    resource = _chassis_resource(row)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 # --- Sensors ---
 
 @router.get("/redfish/v1/Chassis/{chassis_id}/Sensors")
-def chassis_sensors(chassis_id: str, db: sqlite3.Connection = Depends(get_db)):
+def chassis_sensors(
+    chassis_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM chassis WHERE id=?", (chassis_id,)).fetchone():
         return not_found_response(f"Chassis {chassis_id}")
+    total = db.execute("SELECT COUNT(*) FROM chassis_sensors WHERE chassis_id=?", (chassis_id,)).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"/redfish/v1/Chassis/{chassis_id}/Sensors")
     rows = db.execute(
-        "SELECT id FROM chassis_sensors WHERE chassis_id=? ORDER BY id", (chassis_id,)
+        "SELECT id FROM chassis_sensors WHERE chassis_id=? ORDER BY id LIMIT ? OFFSET ?",
+        (chassis_id, limit, offset),
     ).fetchall()
-    return {
+    result = {
         "@odata.id": f"/redfish/v1/Chassis/{chassis_id}/Sensors",
         "@odata.type": "#SensorCollection.SensorCollection",
         "@odata.context": "/redfish/v1/$metadata#SensorCollection.SensorCollection",
         "Name": "Chassis Sensor Collection",
-        "Members@odata.count": len(rows),
-        "Members": [
-            {"@odata.id": f"/redfish/v1/Chassis/{chassis_id}/Sensors/{r['id']}"} for r in rows
-        ],
+        "Members@odata.count": total,
+        "Members": [{"@odata.id": f"/redfish/v1/Chassis/{chassis_id}/Sensors/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/Chassis/{chassis_id}/Sensors/{sensor_id}")
-def chassis_sensor(chassis_id: str, sensor_id: str, db: sqlite3.Connection = Depends(get_db)):
+def chassis_sensor(chassis_id: str, sensor_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute(
         "SELECT * FROM chassis_sensors WHERE chassis_id=? AND id=?", (chassis_id, sensor_id)
     ).fetchone()
     if not row:
         return not_found_response(f"Sensor {sensor_id}")
-    return _chassis_sensor_resource(row, chassis_id)
+    resource = _chassis_sensor_resource(row, chassis_id)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class ChassisSensorPatch(BaseModel):
@@ -154,6 +192,8 @@ def patch_chassis_sensor(
     chassis_id: str,
     sensor_id: str,
     body: ChassisSensorPatch,
+    request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     db: sqlite3.Connection = Depends(get_db),
 ):
@@ -162,6 +202,11 @@ def patch_chassis_sensor(
     ).fetchone()
     if not row:
         return not_found_response(f"Sensor {sensor_id}")
+    if not check_etag(
+        request.headers.get("If-Match"),
+        compute_etag(_chassis_sensor_resource(row, chassis_id)),
+    ):
+        return precondition_failed_response()
     if body.Reading is not None:
         exceeded, severity, msg = check_threshold(row, body.Reading)
         new_health = severity if exceeded else "OK"
@@ -201,7 +246,9 @@ def patch_chassis_sensor(
     row = db.execute(
         "SELECT * FROM chassis_sensors WHERE chassis_id=? AND id=?", (chassis_id, sensor_id)
     ).fetchone()
-    return _chassis_sensor_resource(row, chassis_id)
+    resource = _chassis_sensor_resource(row, chassis_id)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 # --- Power (legacy endpoint) ---

@@ -1,9 +1,10 @@
 import sqlite3
+from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.database import get_db
-from app.helpers import no_content_response, not_found_response
+from app.helpers import no_content_response, not_found_response, odata_pagination
 
 router = APIRouter()
 
@@ -71,22 +72,34 @@ def manager_log_service(manager_id: str, db: sqlite3.Connection = Depends(get_db
 
 
 @router.get("/redfish/v1/Managers/{manager_id}/LogServices/Log/Entries")
-def manager_log_entries(manager_id: str, db: sqlite3.Connection = Depends(get_db)):
+def manager_log_entries(
+    manager_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM managers WHERE id=?", (manager_id,)).fetchone():
         return not_found_response(f"Manager {manager_id}")
-    rows = db.execute(
-        "SELECT id FROM log_entries WHERE owner_type='manager' AND owner_id=? ORDER BY created DESC",
-        (manager_id,),
-    ).fetchall()
     base = f"/redfish/v1/Managers/{manager_id}/LogServices/Log"
-    return {
+    total = db.execute(
+        "SELECT COUNT(*) FROM log_entries WHERE owner_type='manager' AND owner_id=?", (manager_id,)
+    ).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Entries")
+    rows = db.execute(
+        "SELECT id FROM log_entries WHERE owner_type='manager' AND owner_id=? ORDER BY created DESC LIMIT ? OFFSET ?",
+        (manager_id, limit, offset),
+    ).fetchall()
+    result = {
         "@odata.id": f"{base}/Entries",
         "@odata.type": "#LogEntryCollection.LogEntryCollection",
         "@odata.context": "/redfish/v1/$metadata#LogEntryCollection.LogEntryCollection",
         "Name": "Log Entry Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Entries/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/Managers/{manager_id}/LogServices/Log/Entries/{entry_id}")
@@ -136,22 +149,34 @@ def chassis_log_service(chassis_id: str, db: sqlite3.Connection = Depends(get_db
 
 
 @router.get("/redfish/v1/Chassis/{chassis_id}/LogServices/Log/Entries")
-def chassis_log_entries(chassis_id: str, db: sqlite3.Connection = Depends(get_db)):
+def chassis_log_entries(
+    chassis_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM chassis WHERE id=?", (chassis_id,)).fetchone():
         return not_found_response(f"Chassis {chassis_id}")
-    rows = db.execute(
-        "SELECT id FROM log_entries WHERE owner_type='chassis' AND owner_id=? ORDER BY created DESC",
-        (chassis_id,),
-    ).fetchall()
     base = f"/redfish/v1/Chassis/{chassis_id}/LogServices/Log"
-    return {
+    total = db.execute(
+        "SELECT COUNT(*) FROM log_entries WHERE owner_type='chassis' AND owner_id=?", (chassis_id,)
+    ).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Entries")
+    rows = db.execute(
+        "SELECT id FROM log_entries WHERE owner_type='chassis' AND owner_id=? ORDER BY created DESC LIMIT ? OFFSET ?",
+        (chassis_id, limit, offset),
+    ).fetchall()
+    result = {
         "@odata.id": f"{base}/Entries",
         "@odata.type": "#LogEntryCollection.LogEntryCollection",
         "@odata.context": "/redfish/v1/$metadata#LogEntryCollection.LogEntryCollection",
         "Name": "Log Entry Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Entries/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/Chassis/{chassis_id}/LogServices/Log/Entries/{entry_id}")

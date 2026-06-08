@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -14,13 +15,16 @@ from app.routes import (
     power_equipment,
     service_root,
     session_service,
+    task_service,
     ups,
 )
+from app.sse_manager import sse_manager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    sse_manager.set_loop(asyncio.get_event_loop())
     yield
 
 
@@ -45,6 +49,7 @@ _AUTH_EXEMPT = frozenset([
     "/redfish/v1/odata",
     "/redfish/v1/SessionService",
     "/redfish/v1/SessionService/",
+    "/redfish/v1/EventService/SSE",  # auth handled in handler (supports ?token= for browser EventSource)
     "/docs",
     "/openapi.json",
     "/redoc",
@@ -73,3 +78,4 @@ app.include_router(managers.router)
 app.include_router(event_service.router)
 app.include_router(log_service.router)
 app.include_router(session_service.router)
+app.include_router(task_service.router)

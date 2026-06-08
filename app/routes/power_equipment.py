@@ -1,13 +1,25 @@
 import json
 import sqlite3
+import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app import config
 from app.database import get_db
 from app.event_dispatcher import check_threshold, dispatch_event
-from app.helpers import bad_request_response, not_found_response
+from app.helpers import (
+    bad_request_response,
+    check_etag,
+    compute_etag,
+    not_found_response,
+    odata_pagination,
+    precondition_failed_response,
+)
 
 router = APIRouter()
 
@@ -169,6 +181,58 @@ def _recalculate_pdu_aggregates(pdu_id: str, db: sqlite3.Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Background tasks for async power operations
+# ---------------------------------------------------------------------------
+
+def _do_power_cycle_task(task_id: str, pdu_id: str, outlet_id: str) -> None:
+    time.sleep(5)
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE pdu_outlets SET power_state='On', voltage_volts=100.0 WHERE pdu_id=? AND id=?",
+            (pdu_id, outlet_id),
+        )
+        _recalculate_pdu_aggregates(pdu_id, conn)
+        conn.execute(
+            "UPDATE tasks SET task_state='Completed', end_time=? WHERE id=?",
+            (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    dispatch_event(
+        "StatusChange",
+        f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets/{outlet_id}",
+        f"Outlet {outlet_id} PowerCycle completed",
+    )
+
+
+def _do_graceful_shutdown_task(task_id: str, pdu_id: str, outlet_id: str) -> None:
+    time.sleep(3)
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(
+            "UPDATE pdu_outlets SET power_state='Off', voltage_volts=0.0, current_amps=0.0, power_watts=0.0 WHERE pdu_id=? AND id=?",
+            (pdu_id, outlet_id),
+        )
+        _recalculate_pdu_aggregates(pdu_id, conn)
+        conn.execute(
+            "UPDATE tasks SET task_state='Completed', end_time=? WHERE id=?",
+            (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    dispatch_event(
+        "StatusChange",
+        f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets/{outlet_id}",
+        f"Outlet {outlet_id} GracefulShutdown completed",
+    )
+
+
+# ---------------------------------------------------------------------------
 # PowerEquipment
 # ---------------------------------------------------------------------------
 
@@ -194,26 +258,35 @@ def power_equipment():
 # ---------------------------------------------------------------------------
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs")
-def rack_pdus(db: sqlite3.Connection = Depends(get_db)):
-    rows = db.execute("SELECT id FROM rack_pdus ORDER BY id").fetchall()
-    return {
+def rack_pdus(
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
+    total = db.execute("SELECT COUNT(*) FROM rack_pdus").fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, "/redfish/v1/PowerEquipment/RackPDUs")
+    rows = db.execute("SELECT id FROM rack_pdus ORDER BY id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+    result = {
         "@odata.id": "/redfish/v1/PowerEquipment/RackPDUs",
         "@odata.type": "#PowerDistributionCollection.PowerDistributionCollection",
         "@odata.context": "/redfish/v1/$metadata#PowerDistributionCollection.PowerDistributionCollection",
         "Name": "Rack PDU Collection",
-        "Members@odata.count": len(rows),
-        "Members": [
-            {"@odata.id": f"/redfish/v1/PowerEquipment/RackPDUs/{r['id']}"} for r in rows
-        ],
+        "Members@odata.count": total,
+        "Members": [{"@odata.id": f"/redfish/v1/PowerEquipment/RackPDUs/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
-def rack_pdu(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
+def rack_pdu(pdu_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute("SELECT * FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone()
     if not row:
         return not_found_response(f"RackPDU {pdu_id}")
-    return _pdu_resource(row, db)
+    resource = _pdu_resource(row, db)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class PduPatch(BaseModel):
@@ -222,10 +295,18 @@ class PduPatch(BaseModel):
 
 
 @router.patch("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
-def patch_rack_pdu(pdu_id: str, body: PduPatch, db: sqlite3.Connection = Depends(get_db)):
+def patch_rack_pdu(
+    pdu_id: str,
+    body: PduPatch,
+    request: Request,
+    response: Response,
+    db: sqlite3.Connection = Depends(get_db),
+):
     row = db.execute("SELECT * FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone()
     if not row:
         return not_found_response(f"RackPDU {pdu_id}")
+    if not check_etag(request.headers.get("If-Match"), compute_etag(_pdu_resource(row, db))):
+        return precondition_failed_response()
     if body.Status:
         state = body.Status.get("State", row["status_state"])
         health = body.Status.get("Health", row["status_health"])
@@ -235,24 +316,36 @@ def patch_rack_pdu(pdu_id: str, body: PduPatch, db: sqlite3.Connection = Depends
         )
         db.commit()
     row = db.execute("SELECT * FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone()
-    return _pdu_resource(row, db)
+    resource = _pdu_resource(row, db)
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 # --- PDU Mains ---
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Mains")
-def pdu_mains(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_mains(
+    pdu_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone():
         return not_found_response(f"RackPDU {pdu_id}")
-    rows = db.execute("SELECT id FROM pdu_mains WHERE pdu_id=? ORDER BY id", (pdu_id,)).fetchall()
     base = f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}"
-    return {
+    total = db.execute("SELECT COUNT(*) FROM pdu_mains WHERE pdu_id=?", (pdu_id,)).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Mains")
+    rows = db.execute("SELECT id FROM pdu_mains WHERE pdu_id=? ORDER BY id LIMIT ? OFFSET ?", (pdu_id, limit, offset)).fetchall()
+    result = {
         "@odata.id": f"{base}/Mains",
         "@odata.type": "#CircuitCollection.CircuitCollection",
         "Name": "Mains Circuit Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Mains/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Mains/{circuit_id}")
@@ -268,18 +361,28 @@ def pdu_main(pdu_id: str, circuit_id: str, db: sqlite3.Connection = Depends(get_
 # --- PDU Branches ---
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Branches")
-def pdu_branches(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_branches(
+    pdu_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone():
         return not_found_response(f"RackPDU {pdu_id}")
-    rows = db.execute("SELECT id FROM pdu_branches WHERE pdu_id=? ORDER BY id", (pdu_id,)).fetchall()
     base = f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}"
-    return {
+    total = db.execute("SELECT COUNT(*) FROM pdu_branches WHERE pdu_id=?", (pdu_id,)).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Branches")
+    rows = db.execute("SELECT id FROM pdu_branches WHERE pdu_id=? ORDER BY id LIMIT ? OFFSET ?", (pdu_id, limit, offset)).fetchall()
+    result = {
         "@odata.id": f"{base}/Branches",
         "@odata.type": "#CircuitCollection.CircuitCollection",
         "Name": "Branch Circuit Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Branches/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Branches/{circuit_id}")
@@ -295,28 +398,40 @@ def pdu_branch(pdu_id: str, circuit_id: str, db: sqlite3.Connection = Depends(ge
 # --- PDU Outlets ---
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets")
-def pdu_outlets(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_outlets(
+    pdu_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone():
         return not_found_response(f"RackPDU {pdu_id}")
-    rows = db.execute("SELECT id FROM pdu_outlets WHERE pdu_id=? ORDER BY id", (pdu_id,)).fetchall()
     base = f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}"
-    return {
+    total = db.execute("SELECT COUNT(*) FROM pdu_outlets WHERE pdu_id=?", (pdu_id,)).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Outlets")
+    rows = db.execute("SELECT id FROM pdu_outlets WHERE pdu_id=? ORDER BY id LIMIT ? OFFSET ?", (pdu_id, limit, offset)).fetchall()
+    result = {
         "@odata.id": f"{base}/Outlets",
         "@odata.type": "#OutletCollection.OutletCollection",
         "Name": "Outlet Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Outlets/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets/{outlet_id}")
-def pdu_outlet(pdu_id: str, outlet_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_outlet(pdu_id: str, outlet_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute(
         "SELECT * FROM pdu_outlets WHERE pdu_id=? AND id=?", (pdu_id, outlet_id)
     ).fetchone()
     if not row:
         return not_found_response(f"Outlet {outlet_id}")
-    return _outlet_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    resource = _outlet_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class OutletPatch(BaseModel):
@@ -329,6 +444,8 @@ def patch_pdu_outlet(
     pdu_id: str,
     outlet_id: str,
     body: OutletPatch,
+    request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     db: sqlite3.Connection = Depends(get_db),
 ):
@@ -337,6 +454,11 @@ def patch_pdu_outlet(
     ).fetchone()
     if not row:
         return not_found_response(f"Outlet {outlet_id}")
+    if not check_etag(
+        request.headers.get("If-Match"),
+        compute_etag(_outlet_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")),
+    ):
+        return precondition_failed_response()
     if body.PowerState is not None:
         if body.PowerState not in ("On", "Off"):
             return bad_request_response("PowerState must be 'On' or 'Off'")
@@ -360,7 +482,9 @@ def patch_pdu_outlet(
     row = db.execute(
         "SELECT * FROM pdu_outlets WHERE pdu_id=? AND id=?", (pdu_id, outlet_id)
     ).fetchone()
-    return _outlet_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    resource = _outlet_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class PowerControlBody(BaseModel):
@@ -384,20 +508,45 @@ def pdu_outlet_power_control(
     if body.PowerState not in valid_states:
         return bad_request_response(f"PowerState must be one of: {', '.join(valid_states)}")
 
-    if body.PowerState in ("Off", "GracefulShutdown"):
-        new_state = "Off"
-        voltage, current, power = 0.0, 0.0, 0.0
-    elif body.PowerState == "PowerCycle":
-        new_state = "On"
-        voltage = 100.0
-        current = row["current_amps"]
-        power = row["power_watts"]
-    else:
-        new_state = "On"
-        voltage = 100.0
-        current = row["current_amps"]
-        power = row["power_watts"]
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    task_id = str(uuid.uuid4())[:8]
+    target_uri = f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets/{outlet_id}"
 
+    if body.PowerState == "PowerCycle":
+        db.execute(
+            "UPDATE pdu_outlets SET power_state='Off', voltage_volts=0.0, current_amps=0.0, power_watts=0.0 WHERE pdu_id=? AND id=?",
+            (pdu_id, outlet_id),
+        )
+        _recalculate_pdu_aggregates(pdu_id, db)
+        db.execute(
+            "INSERT INTO tasks (id, name, task_state, task_status, start_time, target_uri) VALUES (?,?,?,?,?,?)",
+            (task_id, f"Power Cycle Outlet {outlet_id}", "Running", "OK", now, target_uri),
+        )
+        db.commit()
+        background_tasks.add_task(_do_power_cycle_task, task_id, pdu_id, outlet_id)
+        return JSONResponse(
+            status_code=202,
+            content={"@odata.id": f"/redfish/v1/TaskService/Tasks/{task_id}"},
+            headers={"Location": f"/redfish/v1/TaskService/Tasks/{task_id}"},
+        )
+
+    if body.PowerState == "GracefulShutdown":
+        db.execute(
+            "INSERT INTO tasks (id, name, task_state, task_status, start_time, target_uri) VALUES (?,?,?,?,?,?)",
+            (task_id, f"Graceful Shutdown Outlet {outlet_id}", "Running", "OK", now, target_uri),
+        )
+        db.commit()
+        background_tasks.add_task(_do_graceful_shutdown_task, task_id, pdu_id, outlet_id)
+        return JSONResponse(
+            status_code=202,
+            content={"@odata.id": f"/redfish/v1/TaskService/Tasks/{task_id}"},
+            headers={"Location": f"/redfish/v1/TaskService/Tasks/{task_id}"},
+        )
+
+    new_state = "On" if body.PowerState == "On" else "Off"
+    voltage = 100.0 if new_state == "On" else 0.0
+    current = row["current_amps"] if new_state == "On" else 0.0
+    power = row["power_watts"] if new_state == "On" else 0.0
     db.execute(
         "UPDATE pdu_outlets SET power_state=?, voltage_volts=?, current_amps=?, power_watts=? WHERE pdu_id=? AND id=?",
         (new_state, voltage, current, power, pdu_id, outlet_id),
@@ -407,8 +556,8 @@ def pdu_outlet_power_control(
     background_tasks.add_task(
         dispatch_event,
         "StatusChange",
-        f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Outlets/{outlet_id}",
-        f"Outlet {outlet_id} PowerState changed to {new_state} via {body.PowerState}",
+        target_uri,
+        f"Outlet {outlet_id} PowerState changed to {new_state}",
     )
     row = db.execute(
         "SELECT * FROM pdu_outlets WHERE pdu_id=? AND id=?", (pdu_id, outlet_id)
@@ -419,28 +568,40 @@ def pdu_outlet_power_control(
 # --- PDU Sensors ---
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Sensors")
-def pdu_sensors(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_sensors(
+    pdu_id: str,
+    db: sqlite3.Connection = Depends(get_db),
+    top: Optional[int] = Query(None, alias="$top", ge=1),
+    skip: Optional[int] = Query(None, alias="$skip", ge=0),
+):
     if not db.execute("SELECT 1 FROM rack_pdus WHERE id=?", (pdu_id,)).fetchone():
         return not_found_response(f"RackPDU {pdu_id}")
-    rows = db.execute("SELECT id FROM pdu_sensors WHERE pdu_id=? ORDER BY id", (pdu_id,)).fetchall()
     base = f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}"
-    return {
+    total = db.execute("SELECT COUNT(*) FROM pdu_sensors WHERE pdu_id=?", (pdu_id,)).fetchone()[0]
+    limit, offset, next_link = odata_pagination(top, skip, total, f"{base}/Sensors")
+    rows = db.execute("SELECT id FROM pdu_sensors WHERE pdu_id=? ORDER BY id LIMIT ? OFFSET ?", (pdu_id, limit, offset)).fetchall()
+    result = {
         "@odata.id": f"{base}/Sensors",
         "@odata.type": "#SensorCollection.SensorCollection",
         "Name": "PDU Sensor Collection",
-        "Members@odata.count": len(rows),
+        "Members@odata.count": total,
         "Members": [{"@odata.id": f"{base}/Sensors/{r['id']}"} for r in rows],
     }
+    if next_link:
+        result["Members@odata.nextLink"] = next_link
+    return result
 
 
 @router.get("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Sensors/{sensor_id}")
-def pdu_sensor(pdu_id: str, sensor_id: str, db: sqlite3.Connection = Depends(get_db)):
+def pdu_sensor(pdu_id: str, sensor_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute(
         "SELECT * FROM pdu_sensors WHERE pdu_id=? AND id=?", (pdu_id, sensor_id)
     ).fetchone()
     if not row:
         return not_found_response(f"Sensor {sensor_id}")
-    return _sensor_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    resource = _sensor_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 class SensorPatch(BaseModel):
@@ -454,6 +615,8 @@ def patch_pdu_sensor(
     pdu_id: str,
     sensor_id: str,
     body: SensorPatch,
+    request: Request,
+    response: Response,
     background_tasks: BackgroundTasks,
     db: sqlite3.Connection = Depends(get_db),
 ):
@@ -462,6 +625,11 @@ def patch_pdu_sensor(
     ).fetchone()
     if not row:
         return not_found_response(f"Sensor {sensor_id}")
+    if not check_etag(
+        request.headers.get("If-Match"),
+        compute_etag(_sensor_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")),
+    ):
+        return precondition_failed_response()
     if body.Reading is not None:
         exceeded, severity, msg = check_threshold(row, body.Reading)
         new_health = severity if exceeded else "OK"
@@ -501,7 +669,9 @@ def patch_pdu_sensor(
     row = db.execute(
         "SELECT * FROM pdu_sensors WHERE pdu_id=? AND id=?", (pdu_id, sensor_id)
     ).fetchone()
-    return _sensor_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    resource = _sensor_resource(row, f"/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}")
+    response.headers["ETag"] = f'"{compute_etag(resource)}"'
+    return resource
 
 
 # --- PDU Metrics ---
@@ -535,7 +705,7 @@ def pdu_metrics(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
 
 
 # ---------------------------------------------------------------------------
-# FloorPDUs / PowerShelves (stub — no floor PDUs or power shelves in this emu)
+# FloorPDUs / PowerShelves (stub)
 # ---------------------------------------------------------------------------
 
 @router.get("/redfish/v1/PowerEquipment/FloorPDUs")

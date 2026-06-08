@@ -71,6 +71,15 @@ curl -X DELETE -H "X-Auth-Token: <token>" \
 | GET | `/redfish/v1/$metadata` | OData CSDL スキーマ（XML） |
 | GET | `/redfish/v1/odata` | OData サービスドキュメント（JSON） |
 
+### TaskService
+
+| Method | Path | 説明 |
+|--------|------|------|
+| GET | `/redfish/v1/TaskService` | タスクサービス |
+| GET | `/redfish/v1/TaskService/Tasks` | タスクコレクション（`$top`/`$skip` 対応） |
+| GET | `/redfish/v1/TaskService/Tasks/{id}` | タスク個別（`TaskState` / `StartTime` / `EndTime`） |
+| DELETE | `/redfish/v1/TaskService/Tasks/{id}` | タスク削除 |
+
 ### Service Root
 
 | Method | Path |
@@ -163,6 +172,7 @@ curl -X DELETE -H "X-Auth-Token: <token>" \
 | GET | `/redfish/v1/EventService/Subscriptions/{id}` | 購読個別 |
 | DELETE | `/redfish/v1/EventService/Subscriptions/{id}` | 購読削除 |
 | POST | `/redfish/v1/EventService/Actions/EventService.SubmitTestEvent` | テストイベント送信 |
+| GET | `/redfish/v1/EventService/SSE` | SSE ストリーム（認証不要パス — ハンドラー内で検証） |
 
 ## 使用例
 
@@ -247,6 +257,81 @@ curl -X POST http://localhost:8009/redfish/v1/EventService/Actions/EventService.
 ```
 
 **EventTypes フィルター:** 購読時に `EventTypes` を指定すると、合致するイベントのみ配信される。空配列または未指定の場合は全種別を受信する。
+
+### ETag / If-Match による競合制御
+
+個別リソースの GET レスポンスには `ETag` ヘッダーが付与される。PATCH 時に `If-Match` ヘッダーを送ることで、取得後に他クライアントが変更した場合に 412 Precondition Failed で失敗させられる。
+
+```bash
+# ETag 取得
+ETAG=$(curl -s -i -H "X-Auth-Token: <token>" \
+  http://localhost:8009/redfish/v1/Chassis/Rack1/Sensors/Temp1 | grep -i etag | awk '{print $2}')
+
+# If-Match 一致 → 200 OK
+curl -X PATCH -H "X-Auth-Token: <token>" -H "If-Match: $ETAG" \
+  -H "Content-Type: application/json" \
+  -d '{"Reading": 28.0}' \
+  http://localhost:8009/redfish/v1/Chassis/Rack1/Sensors/Temp1
+
+# If-Match 不一致 → 412 Precondition Failed
+curl -X PATCH -H "X-Auth-Token: <token>" -H 'If-Match: "stale-etag"' \
+  -d '{"Reading": 99.0}' \
+  http://localhost:8009/redfish/v1/Chassis/Rack1/Sensors/Temp1
+```
+
+`If-Match` ヘッダーを省略すると無条件更新（競合チェックなし）。
+
+### $top / $skip ページネーション
+
+全コレクションエンドポイントで `$top`（取得件数）と `$skip`（スキップ件数）をサポートする。`Members@odata.count` は常に全件数を返す。
+
+```bash
+# 最初の2件を取得
+curl -H "X-Auth-Token: <token>" \
+  "http://localhost:8009/redfish/v1/PowerEquipment/RackPDUs/1/Outlets?\$top=2&\$skip=0"
+
+# 次のページ（nextLink に従う）
+curl -H "X-Auth-Token: <token>" \
+  "http://localhost:8009/redfish/v1/PowerEquipment/RackPDUs/1/Outlets?\$top=2&\$skip=2"
+```
+
+次ページがある場合、レスポンスに `Members@odata.nextLink` が含まれる。
+
+### TaskService（非同期操作）
+
+`PowerCycle` / `GracefulShutdown` は即座に `202 Accepted` を返し、`Location` ヘッダーでタスクを指す。タスクはバックグラウンドで実行され、完了後に `TaskState: Completed` になる。
+
+```bash
+# PowerCycle → 202 + タスク Location
+curl -i -X POST -H "X-Auth-Token: <token>" -H "Content-Type: application/json" \
+  -d '{"PowerState":"PowerCycle"}' \
+  http://localhost:8009/redfish/v1/PowerEquipment/RackPDUs/1/Outlets/A1/Actions/Outlet.PowerControl
+# HTTP/1.1 202 Accepted
+# location: /redfish/v1/TaskService/Tasks/<id>
+
+# タスク状態ポーリング
+curl -H "X-Auth-Token: <token>" http://localhost:8009/redfish/v1/TaskService/Tasks/<id>
+# TaskState: Running → Completed（約5秒後）
+
+# 完了タスク削除
+curl -X DELETE -H "X-Auth-Token: <token>" http://localhost:8009/redfish/v1/TaskService/Tasks/<id>
+```
+
+`On` / `Off` は従来どおり同期（200 OK）で応答する。
+
+### SSE（Server-Sent Events）
+
+`GET /redfish/v1/EventService/SSE` に接続すると、以降に発火されるすべてのイベントがリアルタイムで push される。接続中はキープアライブコメントが15秒ごとに送信される。
+
+```bash
+# X-Auth-Token ヘッダーで接続
+curl -H "X-Auth-Token: <token>" http://localhost:8009/redfish/v1/EventService/SSE
+
+# ブラウザの EventSource (カスタムヘッダー不可) 用に ?token= クエリも使用可
+# new EventSource("/redfish/v1/EventService/SSE?token=<token>")
+```
+
+イベント形式は Webhook と同じ `#Event.v1_7_0.Event` ペイロード。
 
 ### アウトレット変更時の自動集計
 

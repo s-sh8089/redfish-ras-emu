@@ -45,6 +45,12 @@ _CSDL = """\
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Session_v1.xml">
     <edmx:Include Namespace="Session.v1_6_0"/>
   </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/TaskService_v1.xml">
+    <edmx:Include Namespace="TaskService.v1_2_0"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/Task_v1.xml">
+    <edmx:Include Namespace="Task.v1_7_0"/>
+  </edmx:Reference>
   <edmx:DataServices>
     <Schema Namespace="RedfishRASEmulator" xmlns="http://docs.oasis-open.org/odata/ns/edm">
       <EntityContainer Name="Service" Extends="ServiceRoot.v1_15_0.ServiceRoot"/>

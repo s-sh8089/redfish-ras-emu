@@ -254,6 +254,16 @@ def _create_tables(conn):
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        task_state TEXT DEFAULT 'Running',
+        task_status TEXT DEFAULT 'OK',
+        start_time TEXT NOT NULL,
+        end_time TEXT,
+        target_uri TEXT
+    );
     """)
     conn.commit()
 
