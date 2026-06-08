@@ -403,6 +403,7 @@ def pdu_sensor(pdu_id: str, sensor_id: str, db: sqlite3.Connection = Depends(get
 class SensorPatch(BaseModel):
     Reading: Optional[float] = None
     Status: Optional[dict] = None
+    Thresholds: Optional[dict] = None
 
 
 @router.patch("/redfish/v1/PowerEquipment/RackPDUs/{pdu_id}/Sensors/{sensor_id}")
@@ -434,6 +435,25 @@ def patch_pdu_sensor(
                 severity,
                 "Base.1.0.ConditionInRelatedResource",
             )
+    if body.Thresholds is not None:
+        threshold_map = {
+            "UpperCaution": "threshold_upper_caution",
+            "UpperCritical": "threshold_upper_critical",
+            "LowerCaution": "threshold_lower_caution",
+            "LowerCritical": "threshold_lower_critical",
+        }
+        t_updates: dict[str, Any] = {}
+        for rf_key, db_col in threshold_map.items():
+            if rf_key in body.Thresholds:
+                val = body.Thresholds[rf_key]
+                t_updates[db_col] = val.get("Reading") if isinstance(val, dict) else None
+        if t_updates:
+            set_clause = ", ".join(f"{k}=?" for k in t_updates)
+            db.execute(
+                f"UPDATE pdu_sensors SET {set_clause} WHERE pdu_id=? AND id=?",
+                (*t_updates.values(), pdu_id, sensor_id),
+            )
+            db.commit()
     row = db.execute(
         "SELECT * FROM pdu_sensors WHERE pdu_id=? AND id=?", (pdu_id, sensor_id)
     ).fetchone()
@@ -467,4 +487,32 @@ def pdu_metrics(pdu_id: str, db: sqlite3.Connection = Depends(get_db)):
             "DataSourceUri": f"{base}/Sensors/Energy1",
             "Reading": energy["reading"] if energy else None,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# FloorPDUs / PowerShelves (stub — no floor PDUs or power shelves in this emu)
+# ---------------------------------------------------------------------------
+
+@router.get("/redfish/v1/PowerEquipment/FloorPDUs")
+def floor_pdus():
+    return {
+        "@odata.id": "/redfish/v1/PowerEquipment/FloorPDUs",
+        "@odata.type": "#PowerDistributionCollection.PowerDistributionCollection",
+        "@odata.context": "/redfish/v1/$metadata#PowerDistributionCollection.PowerDistributionCollection",
+        "Name": "Floor PDU Collection",
+        "Members@odata.count": 0,
+        "Members": [],
+    }
+
+
+@router.get("/redfish/v1/PowerEquipment/PowerShelves")
+def power_shelves():
+    return {
+        "@odata.id": "/redfish/v1/PowerEquipment/PowerShelves",
+        "@odata.type": "#PowerDistributionCollection.PowerDistributionCollection",
+        "@odata.context": "/redfish/v1/$metadata#PowerDistributionCollection.PowerDistributionCollection",
+        "Name": "Power Shelf Collection",
+        "Members@odata.count": 0,
+        "Members": [],
     }

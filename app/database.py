@@ -226,6 +226,18 @@ def _create_tables(conn):
         event_types TEXT,
         status_state TEXT DEFAULT 'Enabled'
     );
+
+    CREATE TABLE IF NOT EXISTS log_entries (
+        id TEXT NOT NULL,
+        owner_type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        created TEXT NOT NULL,
+        entry_type TEXT DEFAULT 'Event',
+        severity TEXT DEFAULT 'OK',
+        message TEXT,
+        origin_of_condition TEXT,
+        PRIMARY KEY (id, owner_type, owner_id)
+    );
     """)
     conn.commit()
 

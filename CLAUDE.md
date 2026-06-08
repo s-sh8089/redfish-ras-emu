@@ -59,14 +59,16 @@ redfish-ras-emu/
 │   ├── config.py            # DB_PATH 設定（環境変数 DB_PATH で上書き可）
 │   ├── database.py          # SQLite 初期化 (init_db)、get_db()、シードデータ
 │   ├── helpers.py           # not_found_response / bad_request_response 等の共通関数
-│   ├── event_dispatcher.py  # dispatch_event() / check_threshold() — Webhook送信・閾値判定
+│   ├── event_dispatcher.py  # dispatch_event() / check_threshold() — Webhook送信・閾値判定・ログ記録
 │   └── routes/              # APIRouter（リソース単位で1ファイル）
 │       ├── __init__.py
 │       ├── service_root.py       # GET /redfish/v1/
-│       ├── power_equipment.py    # PowerEquipment / RackPDUs / Mains / Branches / Outlets / Sensors / Metrics
+│       ├── metadata.py           # GET /redfish/v1/$metadata / /redfish/v1/odata
+│       ├── power_equipment.py    # PowerEquipment / RackPDUs / Mains / Branches / Outlets / Sensors / Metrics / FloorPDUs / PowerShelves
 │       ├── ups.py                # UPSs / Mains / Outlets / Sensors / Metrics
-│       ├── chassis.py            # Chassis / Sensors / Power / Thermal
-│       ├── managers.py           # Managers / NetworkProtocol / EthernetInterfaces
+│       ├── chassis.py            # Chassis / Sensors / Power / Thermal / LogServices
+│       ├── managers.py           # Managers / NetworkProtocol / EthernetInterfaces / LogServices
+│       ├── log_service.py        # LogServices / LogEntries / ClearLog (Manager・Chassis 共用)
 │       └── event_service.py      # EventService / Subscriptions / SubmitTestEvent
 ├── data/                    # SQLite DB 保存先 (コンテナ volume mount: ./data:/data)
 │   └── redfish.db           # 自動生成される。git管理対象外
@@ -86,7 +88,9 @@ redfish-ras-emu/
 | `app/main.py` | `FastAPI` インスタンス生成。`lifespan` で `init_db()` を呼び出す。全 `APIRouter` を `include_router()` で登録する。新規ルート追加時は必ずここに追記する。 |
 | `app/database.py` | `_create_tables()` でテーブル定義、`_seed_data()` で初期データ投入。テーブル追加時は両関数を編集する。`get_db()` は FastAPI の `Depends` 経由でリクエストごとに接続を管理する。 |
 | `app/helpers.py` | `not_found_response()` / `bad_request_response(msg)` / `created_response(data, location)` / `no_content_response()` を提供する。 |
-| `app/event_dispatcher.py` | `dispatch_event(event_type, origin, message, severity, message_id)`: 購読一覧を取得し各宛先にPOST。`check_threshold(row, new_reading)`: センサー閾値超過を判定し `(exceeded, severity, message)` を返す。どちらも独自にDB接続を開く。 |
+| `app/event_dispatcher.py` | `dispatch_event(event_type, origin, message, severity, message_id)`: 購読一覧を取得し各宛先にPOSTし、`log_entries` テーブルへ `owner_type='manager', owner_id='BMC'` でログエントリを記録する。`check_threshold(row, new_reading)`: センサー閾値超過を判定し `(exceeded, severity, message)` を返す。どちらも独自にDB接続を開く。 |
+| `app/routes/metadata.py` | `GET /redfish/v1/$metadata`（EDMX XML）と `GET /redfish/v1/odata`（OData サービスドキュメント JSON）を提供する。 |
+| `app/routes/log_service.py` | Manager・Chassis 両リソースの `LogServices` / `LogEntries` / `ClearLog` を提供する。ログエントリは `event_dispatcher` が自動生成する。 |
 | `app/config.py` | `DB_PATH` は環境変数 `DB_PATH` で上書き可能。デフォルトは `data/redfish.db`。Dockerでは `/data/redfish.db` を使用する。 |
 
 ## データベーステーブル
@@ -106,6 +110,7 @@ redfish-ras-emu/
 | `chassis_sensors` | ラックセンサー |
 | `managers` | 管理コントローラ |
 | `event_subscriptions` | イベント購読 |
+| `log_entries` | ログエントリ。`owner_type`（'manager' / 'chassis'）と `owner_id` で所有者を識別する。`dispatch_event()` が呼ばれるたびに自動生成される（`owner_id='BMC'`）。 |
 
 ## 禁止事項
 

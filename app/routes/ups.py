@@ -373,6 +373,7 @@ def ups_sensor(ups_id: str, sensor_id: str, db: sqlite3.Connection = Depends(get
 
 class UpsSensorPatch(BaseModel):
     Reading: Optional[float] = None
+    Thresholds: Optional[dict] = None
 
 
 @router.patch("/redfish/v1/PowerEquipment/UPSs/{ups_id}/Sensors/{sensor_id}")
@@ -404,6 +405,25 @@ def patch_ups_sensor(
                 severity,
                 "Base.1.0.ConditionInRelatedResource",
             )
+    if body.Thresholds is not None:
+        threshold_map = {
+            "UpperCaution": "threshold_upper_caution",
+            "UpperCritical": "threshold_upper_critical",
+            "LowerCaution": "threshold_lower_caution",
+            "LowerCritical": "threshold_lower_critical",
+        }
+        t_updates: dict[str, Any] = {}
+        for rf_key, db_col in threshold_map.items():
+            if rf_key in body.Thresholds:
+                val = body.Thresholds[rf_key]
+                t_updates[db_col] = val.get("Reading") if isinstance(val, dict) else None
+        if t_updates:
+            set_clause = ", ".join(f"{k}=?" for k in t_updates)
+            db.execute(
+                f"UPDATE ups_sensors SET {set_clause} WHERE ups_id=? AND id=?",
+                (*t_updates.values(), ups_id, sensor_id),
+            )
+            db.commit()
     row = db.execute(
         "SELECT * FROM ups_sensors WHERE ups_id=? AND id=?", (ups_id, sensor_id)
     ).fetchone()

@@ -15,20 +15,27 @@ def dispatch_event(
     severity: str = "OK",
     message_id: str = "Base.1.0.PropertyValueChanged",
 ):
+    event_id = str(uuid.uuid4())[:8]
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
+    subs = []
     try:
         subs = conn.execute(
             "SELECT * FROM event_subscriptions WHERE status_state='Enabled'"
         ).fetchall()
+        conn.execute(
+            """INSERT INTO log_entries (id, owner_type, owner_id, created, entry_type, severity, message, origin_of_condition)
+               VALUES (?, 'manager', 'BMC', ?, ?, ?, ?, ?)""",
+            (event_id, timestamp, event_type, severity, message, origin_of_condition),
+        )
+        conn.commit()
     finally:
         conn.close()
 
     if not subs:
         return
-
-    event_id = str(uuid.uuid4())[:8]
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for sub in subs:
         if sub["event_types"]:

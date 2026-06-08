@@ -22,6 +22,7 @@ def _manager_resource(row) -> dict:
         "Status": {"State": row["status_state"], "Health": row["status_health"]},
         "NetworkProtocol": {"@odata.id": f"{base}/NetworkProtocol"},
         "EthernetInterfaces": {"@odata.id": f"{base}/EthernetInterfaces"},
+        "LogServices": {"@odata.id": f"{base}/LogServices"},
         "Links": {
             "ManagedChassisCount": 1,
         },

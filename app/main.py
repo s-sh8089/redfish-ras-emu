@@ -7,7 +7,9 @@ from app.database import init_db
 from app.routes import (
     chassis,
     event_service,
+    log_service,
     managers,
+    metadata,
     power_equipment,
     service_root,
     ups,
@@ -34,9 +36,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(metadata.router)
 app.include_router(service_root.router)
 app.include_router(power_equipment.router)
 app.include_router(ups.router)
 app.include_router(chassis.router)
 app.include_router(managers.router)
 app.include_router(event_service.router)
+app.include_router(log_service.router)

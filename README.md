@@ -29,6 +29,13 @@ docker compose up
 
 ## API エンドポイント
 
+### OData / Metadata
+
+| Method | Path | 説明 |
+|--------|------|------|
+| GET | `/redfish/v1/$metadata` | OData CSDL スキーマ（XML） |
+| GET | `/redfish/v1/odata` | OData サービスドキュメント（JSON） |
+
 ### Service Root
 
 | Method | Path |
@@ -50,8 +57,10 @@ docker compose up
 | GET, PATCH | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Outlets/{oid}` | アウトレット個別 |
 | POST | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Outlets/{oid}/Actions/Outlet.PowerControl` | 電源制御 |
 | GET | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Sensors` | センサーコレクション |
-| GET, PATCH | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Sensors/{sid}` | センサー個別 |
+| GET, PATCH | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Sensors/{sid}` | センサー個別（Reading・Thresholds PATCH 可） |
 | GET | `/redfish/v1/PowerEquipment/RackPDUs/{id}/Metrics` | メトリクス |
+| GET | `/redfish/v1/PowerEquipment/FloorPDUs` | フロアPDUコレクション（スタブ・常に空） |
+| GET | `/redfish/v1/PowerEquipment/PowerShelves` | パワーシェルフコレクション（スタブ・常に空） |
 
 ### UPS
 
@@ -65,7 +74,7 @@ docker compose up
 | GET, PATCH | `/redfish/v1/PowerEquipment/UPSs/{id}/Outlets/{oid}` | アウトレット個別 |
 | POST | `/redfish/v1/PowerEquipment/UPSs/{id}/Outlets/{oid}/Actions/Outlet.PowerControl` | 電源制御 |
 | GET | `/redfish/v1/PowerEquipment/UPSs/{id}/Sensors` | センサーコレクション |
-| GET, PATCH | `/redfish/v1/PowerEquipment/UPSs/{id}/Sensors/{sid}` | センサー個別 |
+| GET, PATCH | `/redfish/v1/PowerEquipment/UPSs/{id}/Sensors/{sid}` | センサー個別（Reading・Thresholds PATCH 可） |
 | GET | `/redfish/v1/PowerEquipment/UPSs/{id}/Metrics` | メトリクス |
 
 ### Chassis
@@ -75,9 +84,14 @@ docker compose up
 | GET | `/redfish/v1/Chassis` | シャーシコレクション |
 | GET, PATCH | `/redfish/v1/Chassis/{id}` | シャーシ個別 |
 | GET | `/redfish/v1/Chassis/{id}/Sensors` | センサーコレクション |
-| GET, PATCH | `/redfish/v1/Chassis/{id}/Sensors/{sid}` | センサー個別 |
+| GET, PATCH | `/redfish/v1/Chassis/{id}/Sensors/{sid}` | センサー個別（Reading・Thresholds PATCH 可） |
 | GET | `/redfish/v1/Chassis/{id}/Power` | 電力サマリ（レガシー） |
 | GET | `/redfish/v1/Chassis/{id}/Thermal` | 温熱サマリ（レガシー） |
+| GET | `/redfish/v1/Chassis/{id}/LogServices` | ログサービスコレクション |
+| GET | `/redfish/v1/Chassis/{id}/LogServices/Log` | ログサービス |
+| GET | `/redfish/v1/Chassis/{id}/LogServices/Log/Entries` | ログエントリコレクション |
+| GET | `/redfish/v1/Chassis/{id}/LogServices/Log/Entries/{eid}` | ログエントリ個別 |
+| POST | `/redfish/v1/Chassis/{id}/LogServices/Log/Actions/LogService.ClearLog` | ログ消去 |
 
 ### Managers
 
@@ -88,6 +102,11 @@ docker compose up
 | GET | `/redfish/v1/Managers/{id}/NetworkProtocol` | ネットワークプロトコル |
 | GET | `/redfish/v1/Managers/{id}/EthernetInterfaces` | NICコレクション |
 | GET | `/redfish/v1/Managers/{id}/EthernetInterfaces/{nic_id}` | NIC個別 |
+| GET | `/redfish/v1/Managers/{id}/LogServices` | ログサービスコレクション |
+| GET | `/redfish/v1/Managers/{id}/LogServices/Log` | ログサービス |
+| GET | `/redfish/v1/Managers/{id}/LogServices/Log/Entries` | ログエントリコレクション |
+| GET | `/redfish/v1/Managers/{id}/LogServices/Log/Entries/{eid}` | ログエントリ個別 |
+| POST | `/redfish/v1/Managers/{id}/LogServices/Log/Actions/LogService.ClearLog` | ログ消去 |
 
 ### EventService
 
@@ -123,7 +142,7 @@ curl -X POST http://localhost:8009/redfish/v1/PowerEquipment/RackPDUs/1/Outlets/
 
 `PowerState` の有効値: `On` / `Off` / `PowerCycle` / `GracefulShutdown`
 
-### センサー値の更新（シミュレーション用）
+### センサー値・閾値の更新（シミュレーション用）
 
 ```bash
 # 温度センサーの値を更新
@@ -135,7 +154,20 @@ curl -X PATCH http://localhost:8009/redfish/v1/Chassis/Rack1/Sensors/Temp1 \
 curl -X PATCH http://localhost:8009/redfish/v1/PowerEquipment/UPSs/1/Sensors/BattCharge \
   -H "Content-Type: application/json" \
   -d '{"Reading": 20.0}'
+
+# センサー閾値を変更
+curl -X PATCH http://localhost:8009/redfish/v1/PowerEquipment/RackPDUs/1/Sensors/Temp1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Thresholds": {
+      "UpperCaution":  {"Reading": 45.0},
+      "UpperCritical": {"Reading": 60.0},
+      "LowerCaution":  null
+    }
+  }'
 ```
+
+`Thresholds` の各キー（`UpperCaution` / `UpperCritical` / `LowerCaution` / `LowerCritical`）に `{"Reading": 値}` を指定すると更新、`null` を指定するとその閾値を削除できる。`Reading` と `Thresholds` は同一リクエストで同時指定可能。
 
 ### UPS 状態変更
 
@@ -170,6 +202,23 @@ curl -X POST http://localhost:8009/redfish/v1/EventService/Actions/EventService.
 ```
 
 **EventTypes フィルター:** 購読時に `EventTypes` を指定すると、合致するイベントのみ配信される。空配列または未指定の場合は全種別を受信する。
+
+### LogService（ログ参照・消去）
+
+状態変化やアラートが発生するたびに、BMC（`/redfish/v1/Managers/BMC`）のログに自動記録される。
+
+```bash
+# ログエントリ一覧（新しい順）
+curl http://localhost:8009/redfish/v1/Managers/BMC/LogServices/Log/Entries
+
+# ログエントリ個別取得
+curl http://localhost:8009/redfish/v1/Managers/BMC/LogServices/Log/Entries/{entry_id}
+
+# ログ全消去
+curl -X POST http://localhost:8009/redfish/v1/Managers/BMC/LogServices/Log/Actions/LogService.ClearLog
+```
+
+Chassis ログ（`/redfish/v1/Chassis/Rack1/LogServices/Log/Entries`）も同様に参照・消去できる。
 
 ## Webhook イベント通知
 
@@ -216,6 +265,7 @@ curl -X POST http://localhost:8009/redfish/v1/EventService/Actions/EventService.
 2. レスポンス返却後にバックグラウンドで実行（リクエストをブロックしない）
 3. `event_subscriptions` テーブルから有効な購読を取得し、`EventTypes` フィルターを適用
 4. 合致した購読先へ `requests.post(timeout=5)` でPOST（失敗は無視）
+5. 同タイミングで `log_entries` テーブルに BMC ログエントリを自動記録する（購読有無に関わらず）
 
 ## シードデータ
 
