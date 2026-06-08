@@ -27,6 +27,41 @@ rm -f data/redfish.db
 docker compose up
 ```
 
+## 認証
+
+全APIエンドポイントは `X-Auth-Token` ヘッダーによる認証が必要（下記の認証不要パスを除く）。
+
+### 認証不要パス
+
+| Path | 理由 |
+|------|------|
+| `GET /redfish/v1/` | サービスルート（ディスカバリ用） |
+| `GET /redfish/v1/$metadata` | OData メタデータ |
+| `GET /redfish/v1/odata` | OData サービスドキュメント |
+| `GET /redfish/v1/SessionService` | セッションサービス情報 |
+| `POST /redfish/v1/SessionService/Sessions` | ログイン（トークン発行） |
+
+### ログイン・ログアウト
+
+```bash
+# ログイン（X-Auth-Token を取得）
+curl -i -X POST http://localhost:8009/redfish/v1/SessionService/Sessions \
+  -H "Content-Type: application/json" \
+  -d '{"UserName": "admin", "Password": "redfish"}'
+# → レスポンスヘッダー X-Auth-Token: <token> を保存して以降のリクエストに使用する
+
+# 認証付きリクエストの例
+curl -H "X-Auth-Token: <token>" http://localhost:8009/redfish/v1/Chassis
+
+# ログアウト（セッション削除）
+curl -X DELETE -H "X-Auth-Token: <token>" \
+  http://localhost:8009/redfish/v1/SessionService/Sessions/<session_id>
+```
+
+**デフォルトアカウント:** `admin` / `redfish`（SHA-256 ハッシュで保存）
+
+---
+
 ## API エンドポイント
 
 ### OData / Metadata
@@ -41,6 +76,16 @@ docker compose up
 | Method | Path |
 |--------|------|
 | GET | `/redfish/v1/` |
+
+### SessionService
+
+| Method | Path | 説明 |
+|--------|------|------|
+| GET | `/redfish/v1/SessionService` | セッションサービス（認証不要） |
+| POST | `/redfish/v1/SessionService/Sessions` | ログイン — `X-Auth-Token` を発行（認証不要） |
+| GET | `/redfish/v1/SessionService/Sessions` | セッション一覧 |
+| GET | `/redfish/v1/SessionService/Sessions/{id}` | セッション個別 |
+| DELETE | `/redfish/v1/SessionService/Sessions/{id}` | ログアウト |
 
 ### PowerEquipment
 
@@ -203,6 +248,30 @@ curl -X POST http://localhost:8009/redfish/v1/EventService/Actions/EventService.
 
 **EventTypes フィルター:** 購読時に `EventTypes` を指定すると、合致するイベントのみ配信される。空配列または未指定の場合は全種別を受信する。
 
+### アウトレット変更時の自動集計
+
+PDU・UPS のアウトレットを ON/OFF すると、関連する集計値が自動更新される。
+
+| リソース | 自動更新される項目 |
+|---------|----------------|
+| `pdu_branches` | `CurrentAmps`, `PowerWatts`（配下アウトレットの合計） |
+| `pdu_mains` | `CurrentAmps`, `PowerWatts`（全ブランチの合計） |
+| `pdu_sensors` | `reading_type=Current` と `Power` センサーの `Reading` |
+| `ups_mains` | `CurrentAmps`, `PowerWatts`（全アウトレットの合計） |
+| `ups_sensors` | `OutputPower` センサーの `Reading` |
+
+### センサー閾値超過時の status_health 自動更新
+
+センサーの `Reading` を PATCH すると、閾値チェック結果が `Status.Health` にも反映される。
+
+| 状態 | `Status.Health` |
+|------|----------------|
+| 正常範囲 | `OK` |
+| UpperCaution / LowerCaution 超過 | `Warning` |
+| UpperCritical / LowerCritical 超過 | `Critical` |
+
+正常値に戻すと `Health` は自動的に `OK` に復帰する。
+
 ### LogService（ログ参照・消去）
 
 状態変化やアラートが発生するたびに、BMC（`/redfish/v1/Managers/BMC`）のログに自動記録される。
@@ -264,8 +333,16 @@ Chassis ログ（`/redfish/v1/Chassis/Rack1/LogServices/Log/Entries`）も同様
 1. 状態変化後、FastAPI `BackgroundTasks` に `dispatch_event()` を登録
 2. レスポンス返却後にバックグラウンドで実行（リクエストをブロックしない）
 3. `event_subscriptions` テーブルから有効な購読を取得し、`EventTypes` フィルターを適用
-4. 合致した購読先へ `requests.post(timeout=5)` でPOST（失敗は無視）
-5. 同タイミングで `log_entries` テーブルに BMC ログエントリを自動記録する（購読有無に関わらず）
+4. 同タイミングで `log_entries` テーブルに BMC ログエントリを自動記録する（購読有無に関わらず）
+5. 合致した購読先へ `requests.post(timeout=5)` で POST。5xx またはコネクションエラーの場合は `EVENT_RETRY_INTERVAL` 秒（デフォルト60秒）待って最大 `EVENT_RETRY_ATTEMPTS` 回（デフォルト3回）まで再送する。4xx は再送しない。
+
+**リトライ設定の変更（テスト等）:**
+
+```bash
+# docker-compose.yml の environment またはコンテナ起動時に指定
+EVENT_RETRY_ATTEMPTS=3
+EVENT_RETRY_INTERVAL=5   # テスト時は短縮可
+```
 
 ## シードデータ
 

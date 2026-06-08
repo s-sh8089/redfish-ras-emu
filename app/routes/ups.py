@@ -127,6 +127,26 @@ def _ups_sensor_resource(row, parent_base: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Aggregate helper
+# ---------------------------------------------------------------------------
+
+def _recalculate_ups_aggregates(ups_id: str, db: sqlite3.Connection) -> None:
+    agg = db.execute(
+        "SELECT COALESCE(SUM(current_amps),0) AS cur, COALESCE(SUM(power_watts),0) AS pwr "
+        "FROM ups_outlets WHERE ups_id=?",
+        (ups_id,),
+    ).fetchone()
+    db.execute(
+        "UPDATE ups_mains SET current_amps=?, power_watts=? WHERE ups_id=?",
+        (agg["cur"], agg["pwr"], ups_id),
+    )
+    db.execute(
+        "UPDATE ups_sensors SET reading=? WHERE ups_id=? AND id='OutputPower'",
+        (agg["pwr"], ups_id),
+    )
+
+
+# ---------------------------------------------------------------------------
 # UPS Collection
 # ---------------------------------------------------------------------------
 
@@ -285,6 +305,7 @@ def patch_ups_outlet(
             "UPDATE ups_outlets SET power_state=?, voltage_volts=?, current_amps=?, power_watts=? WHERE ups_id=? AND id=?",
             (body.PowerState, voltage, current, power, ups_id, outlet_id),
         )
+        _recalculate_ups_aggregates(ups_id, db)
         db.commit()
         background_tasks.add_task(
             dispatch_event,
@@ -331,6 +352,7 @@ def ups_outlet_power_control(
         "UPDATE ups_outlets SET power_state=?, voltage_volts=?, current_amps=?, power_watts=? WHERE ups_id=? AND id=?",
         (new_state, voltage, current, power, ups_id, outlet_id),
     )
+    _recalculate_ups_aggregates(ups_id, db)
     db.commit()
     background_tasks.add_task(
         dispatch_event,
@@ -391,9 +413,10 @@ def patch_ups_sensor(
         return not_found_response(f"Sensor {sensor_id}")
     if body.Reading is not None:
         exceeded, severity, msg = check_threshold(row, body.Reading)
+        new_health = severity if exceeded else "OK"
         db.execute(
-            "UPDATE ups_sensors SET reading=? WHERE ups_id=? AND id=?",
-            (body.Reading, ups_id, sensor_id),
+            "UPDATE ups_sensors SET reading=?, status_health=? WHERE ups_id=? AND id=?",
+            (body.Reading, new_health, ups_id, sensor_id),
         )
         db.commit()
         if exceeded:

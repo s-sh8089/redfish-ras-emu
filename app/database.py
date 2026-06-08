@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sqlite3
 
@@ -238,11 +239,33 @@ def _create_tables(conn):
         origin_of_condition TEXT,
         PRIMARY KEY (id, owner_type, owner_id)
     );
+
+    CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT DEFAULT 'Administrator'
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        token TEXT UNIQUE NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    );
     """)
     conn.commit()
 
 
 def _seed_data(conn):
+    if conn.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 0:
+        conn.execute(
+            "INSERT INTO accounts (id, username, password_hash, role) VALUES ('1', 'admin', ?, 'Administrator')",
+            (hashlib.sha256("redfish".encode()).hexdigest(),),
+        )
+        conn.commit()
+
     if conn.execute("SELECT COUNT(*) FROM rack_pdus").fetchone()[0] > 0:
         return
 

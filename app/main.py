@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import unauthorized_response, validate_token
 from app.database import init_db
 from app.routes import (
     chassis,
@@ -12,6 +13,7 @@ from app.routes import (
     metadata,
     power_equipment,
     service_root,
+    session_service,
     ups,
 )
 
@@ -36,6 +38,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_AUTH_EXEMPT = frozenset([
+    "/redfish/v1/",
+    "/redfish/v1",
+    "/redfish/v1/$metadata",
+    "/redfish/v1/odata",
+    "/redfish/v1/SessionService",
+    "/redfish/v1/SessionService/",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+])
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path in _AUTH_EXEMPT:
+        return await call_next(request)
+    if path == "/redfish/v1/SessionService/Sessions" and request.method == "POST":
+        return await call_next(request)
+    token = request.headers.get("X-Auth-Token")
+    if not token or not validate_token(token):
+        return unauthorized_response()
+    return await call_next(request)
+
+
 app.include_router(metadata.router)
 app.include_router(service_root.router)
 app.include_router(power_equipment.router)
@@ -44,3 +72,4 @@ app.include_router(chassis.router)
 app.include_router(managers.router)
 app.include_router(event_service.router)
 app.include_router(log_service.router)
+app.include_router(session_service.router)

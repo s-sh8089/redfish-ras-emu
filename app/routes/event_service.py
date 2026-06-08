@@ -7,6 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from app import config
 from app.database import get_db
 from app.event_dispatcher import dispatch_event
 from app.helpers import bad_request_response, created_response, no_content_response, not_found_response
@@ -26,8 +27,8 @@ def event_service():
         "Name": "Event Service",
         "Status": {"State": "Enabled", "Health": "OK"},
         "ServiceEnabled": True,
-        "DeliveryRetryAttempts": 3,
-        "DeliveryRetryIntervalSeconds": 60,
+        "DeliveryRetryAttempts": config.EVENT_RETRY_ATTEMPTS,
+        "DeliveryRetryIntervalSeconds": config.EVENT_RETRY_INTERVAL,
         "EventTypesForSubscription": [
             "StatusChange",
             "ResourceUpdated",

@@ -128,6 +128,47 @@ def _sensor_resource(row, parent_base: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Aggregate helpers
+# ---------------------------------------------------------------------------
+
+def _recalculate_pdu_aggregates(pdu_id: str, db: sqlite3.Connection) -> None:
+    branch_ids = [
+        r["branch_id"]
+        for r in db.execute(
+            "SELECT DISTINCT branch_id FROM pdu_outlets WHERE pdu_id=? AND branch_id IS NOT NULL",
+            (pdu_id,),
+        ).fetchall()
+    ]
+    for bid in branch_ids:
+        agg = db.execute(
+            "SELECT COALESCE(SUM(current_amps),0) AS cur, COALESCE(SUM(power_watts),0) AS pwr "
+            "FROM pdu_outlets WHERE pdu_id=? AND branch_id=?",
+            (pdu_id, bid),
+        ).fetchone()
+        db.execute(
+            "UPDATE pdu_branches SET current_amps=?, power_watts=? WHERE pdu_id=? AND id=?",
+            (agg["cur"], agg["pwr"], pdu_id, bid),
+        )
+    main_agg = db.execute(
+        "SELECT COALESCE(SUM(current_amps),0) AS cur, COALESCE(SUM(power_watts),0) AS pwr "
+        "FROM pdu_branches WHERE pdu_id=?",
+        (pdu_id,),
+    ).fetchone()
+    db.execute(
+        "UPDATE pdu_mains SET current_amps=?, power_watts=? WHERE pdu_id=?",
+        (main_agg["cur"], main_agg["pwr"], pdu_id),
+    )
+    db.execute(
+        "UPDATE pdu_sensors SET reading=? WHERE pdu_id=? AND reading_type='Current'",
+        (main_agg["cur"], pdu_id),
+    )
+    db.execute(
+        "UPDATE pdu_sensors SET reading=? WHERE pdu_id=? AND reading_type='Power'",
+        (main_agg["pwr"], pdu_id),
+    )
+
+
+# ---------------------------------------------------------------------------
 # PowerEquipment
 # ---------------------------------------------------------------------------
 
@@ -308,6 +349,7 @@ def patch_pdu_outlet(
             "UPDATE pdu_outlets SET power_state=?, voltage_volts=?, current_amps=?, power_watts=? WHERE pdu_id=? AND id=?",
             (body.PowerState, voltage, current, power, pdu_id, outlet_id),
         )
+        _recalculate_pdu_aggregates(pdu_id, db)
         db.commit()
         background_tasks.add_task(
             dispatch_event,
@@ -360,6 +402,7 @@ def pdu_outlet_power_control(
         "UPDATE pdu_outlets SET power_state=?, voltage_volts=?, current_amps=?, power_watts=? WHERE pdu_id=? AND id=?",
         (new_state, voltage, current, power, pdu_id, outlet_id),
     )
+    _recalculate_pdu_aggregates(pdu_id, db)
     db.commit()
     background_tasks.add_task(
         dispatch_event,
@@ -421,9 +464,10 @@ def patch_pdu_sensor(
         return not_found_response(f"Sensor {sensor_id}")
     if body.Reading is not None:
         exceeded, severity, msg = check_threshold(row, body.Reading)
+        new_health = severity if exceeded else "OK"
         db.execute(
-            "UPDATE pdu_sensors SET reading=? WHERE pdu_id=? AND id=?",
-            (body.Reading, pdu_id, sensor_id),
+            "UPDATE pdu_sensors SET reading=?, status_health=? WHERE pdu_id=? AND id=?",
+            (body.Reading, new_health, pdu_id, sensor_id),
         )
         db.commit()
         if exceeded:

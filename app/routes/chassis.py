@@ -164,9 +164,10 @@ def patch_chassis_sensor(
         return not_found_response(f"Sensor {sensor_id}")
     if body.Reading is not None:
         exceeded, severity, msg = check_threshold(row, body.Reading)
+        new_health = severity if exceeded else "OK"
         db.execute(
-            "UPDATE chassis_sensors SET reading=? WHERE chassis_id=? AND id=?",
-            (body.Reading, chassis_id, sensor_id),
+            "UPDATE chassis_sensors SET reading=?, status_health=? WHERE chassis_id=? AND id=?",
+            (body.Reading, new_health, chassis_id, sensor_id),
         )
         db.commit()
         if exceeded:

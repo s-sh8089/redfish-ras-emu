@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -61,10 +62,21 @@ def dispatch_event(
             ],
         }
 
+        _deliver_with_retry(sub["destination"], payload)
+
+
+def _deliver_with_retry(destination: str, payload: dict) -> None:
+    for attempt in range(config.EVENT_RETRY_ATTEMPTS):
         try:
-            requests.post(sub["destination"], json=payload, timeout=5)
+            resp = requests.post(destination, json=payload, timeout=5)
+            if resp.ok:
+                return
+            if resp.status_code < 500:
+                return
         except Exception:
             pass
+        if attempt < config.EVENT_RETRY_ATTEMPTS - 1:
+            time.sleep(config.EVENT_RETRY_INTERVAL)
 
 
 def check_threshold(row, new_reading: float) -> tuple[bool, str, str]:
