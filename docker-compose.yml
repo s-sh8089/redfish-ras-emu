@@ -8,3 +8,10 @@ services:
     environment:
       - DB_PATH=/data/redfish.db
     restart: unless-stopped
+
+    networks:
+      - redfish-net
+
+networks:
+  redfish-net:
+    external: true
