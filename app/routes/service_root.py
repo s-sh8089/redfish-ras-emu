@@ -18,6 +18,7 @@ def service_root():
         "Chassis": {"@odata.id": "/redfish/v1/Chassis"},
         "Managers": {"@odata.id": "/redfish/v1/Managers"},
         "EventService": {"@odata.id": "/redfish/v1/EventService"},
+        "TelemetryService": {"@odata.id": "/redfish/v1/TelemetryService"},
         "SessionService": {"@odata.id": "/redfish/v1/SessionService"},
         "Tasks": {"@odata.id": "/redfish/v1/TaskService"},
         "Links": {

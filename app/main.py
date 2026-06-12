@@ -16,6 +16,7 @@ from app.routes import (
     service_root,
     session_service,
     task_service,
+    telemetry_service,
     ups,
 )
 from app.sse_manager import sse_manager
@@ -33,6 +34,7 @@ app = FastAPI(
     description="Redfish API simulator for RAS rack power and sensor management (DSP2056)",
     version="1.0.0",
     lifespan=lifespan,
+    redirect_slashes=False,
 )
 
 app.add_middleware(
@@ -79,3 +81,4 @@ app.include_router(event_service.router)
 app.include_router(log_service.router)
 app.include_router(session_service.router)
 app.include_router(task_service.router)
+app.include_router(telemetry_service.router)

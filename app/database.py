@@ -264,6 +264,39 @@ def _create_tables(conn):
         end_time TEXT,
         target_uri TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS metric_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        metric_type TEXT DEFAULT 'Gauge',
+        implementation TEXT DEFAULT 'PhysicalSensor',
+        metric_data_type TEXT DEFAULT 'Decimal',
+        units TEXT,
+        min_reading_range REAL,
+        max_reading_range REAL,
+        physical_context TEXT,
+        sensor_type TEXT,
+        metric_properties TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS metric_report_definitions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        definition_type TEXT DEFAULT 'OnRequest',
+        schedule_interval TEXT,
+        metrics TEXT NOT NULL,
+        report_actions TEXT DEFAULT '["LogToMetricReportsCollection"]',
+        status_state TEXT DEFAULT 'Enabled',
+        status_health TEXT DEFAULT 'OK'
+    );
+
+    CREATE TABLE IF NOT EXISTS log_services (
+        owner_type TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        max_number_of_records INTEGER DEFAULT 1000,
+        overwrite_policy TEXT DEFAULT 'WrapsWhenFull',
+        PRIMARY KEY (owner_type, owner_id)
+    );
     """)
     conn.commit()
 
@@ -275,6 +308,12 @@ def _seed_data(conn):
             (hashlib.sha256("redfish".encode()).hexdigest(),),
         )
         conn.commit()
+
+    if conn.execute("SELECT COUNT(*) FROM metric_definitions").fetchone()[0] == 0:
+        _seed_metric_definitions(conn)
+
+    if conn.execute("SELECT COUNT(*) FROM log_services").fetchone()[0] == 0:
+        _seed_log_services(conn)
 
     if conn.execute("SELECT COUNT(*) FROM rack_pdus").fetchone()[0] > 0:
         return
@@ -413,4 +452,51 @@ def _seed_data(conn):
             ('BMC','Rack Management Controller','RackManager','1.0.0','192.168.1.1','rack-bmc-1')
     """)
 
+    conn.commit()
+
+
+def _seed_log_services(conn):
+    conn.executemany(
+        "INSERT INTO log_services (owner_type, owner_id, max_number_of_records, overwrite_policy) VALUES (?,?,?,?)",
+        [
+            ('manager', 'BMC',   1000, 'WrapsWhenFull'),
+            ('chassis', 'Rack1', 1000, 'WrapsWhenFull'),
+            ('pdu',     '1',     1000, 'WrapsWhenFull'),
+            ('ups',     '1',     1000, 'WrapsWhenFull'),
+        ],
+    )
+    conn.commit()
+
+
+def _seed_metric_definitions(conn):
+    import json as _j
+    _PDU = "/redfish/v1/PowerEquipment/RackPDUs/1/Sensors"
+    _UPS = "/redfish/v1/PowerEquipment/UPSs/1/Sensors"
+    _CHS = "/redfish/v1/Chassis/Rack1/Sensors"
+    conn.executemany("""
+        INSERT INTO metric_definitions
+            (id, name, metric_type, implementation, metric_data_type, units,
+             min_reading_range, max_reading_range, physical_context, sensor_type, metric_properties)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, [
+        ('PDU_Current',      'PDU AC Input Current',    'Gauge',   'PhysicalSensor', 'Decimal', 'A',    0.0,   30.0, 'ACInput',     'Current',     _j.dumps([f"{_PDU}/Current1#Reading"])),
+        ('PDU_Voltage',      'PDU AC Input Voltage',    'Gauge',   'PhysicalSensor', 'Decimal', 'V',    0.0,  250.0, 'ACInput',     'Voltage',     _j.dumps([f"{_PDU}/Voltage1#Reading"])),
+        ('PDU_Power',        'PDU AC Input Power',      'Gauge',   'PhysicalSensor', 'Decimal', 'W',    0.0, 6000.0, 'ACInput',     'PowerWatts',  _j.dumps([f"{_PDU}/Power1#Reading"])),
+        ('PDU_Energy',       'PDU Energy Consumed',     'Counter', 'PhysicalSensor', 'Decimal', 'kWh',  0.0,   None, 'ACInput',     'EnergyJoules',_j.dumps([f"{_PDU}/Energy1#Reading"])),
+        ('PDU_Frequency',    'PDU AC Input Frequency',  'Gauge',   'PhysicalSensor', 'Decimal', 'Hz',  45.0,   55.0, 'ACInput',     'Frequency',   _j.dumps([f"{_PDU}/Freq1#Reading"])),
+        ('PDU_Temperature',  'PDU Ambient Temperature', 'Gauge',   'PhysicalSensor', 'Decimal', 'Cel',  0.0,   70.0, 'Ambient',     'Temperature', _j.dumps([f"{_PDU}/Temp1#Reading"])),
+        ('UPS_InputPower',   'UPS AC Input Power',      'Gauge',   'PhysicalSensor', 'Decimal', 'W',    0.0, 4500.0, 'ACInput',     'PowerWatts',  _j.dumps([f"{_UPS}/InputPower#Reading"])),
+        ('UPS_OutputPower',  'UPS AC Output Power',     'Gauge',   'PhysicalSensor', 'Decimal', 'W',    0.0, 4500.0, 'ACOutput',    'PowerWatts',  _j.dumps([f"{_UPS}/OutputPower#Reading"])),
+        ('UPS_BattVoltage',  'UPS Battery Voltage',     'Gauge',   'PhysicalSensor', 'Decimal', 'V',    0.0,   60.0, 'Battery',     'Voltage',     _j.dumps([f"{_UPS}/BattVoltage#Reading"])),
+        ('UPS_BattCharge',   'UPS Battery Charge',      'Gauge',   'PhysicalSensor', 'Decimal', '%',    0.0,  100.0, 'Battery',     'Percent',     _j.dumps([f"{_UPS}/BattCharge#Reading"])),
+        ('UPS_InputVoltage', 'UPS AC Input Voltage',    'Gauge',   'PhysicalSensor', 'Decimal', 'V',    0.0,  250.0, 'ACInput',     'Voltage',     _j.dumps([f"{_UPS}/InputVoltage#Reading"])),
+        ('UPS_OutputVoltage','UPS AC Output Voltage',   'Gauge',   'PhysicalSensor', 'Decimal', 'V',    0.0,  250.0, 'ACOutput',    'Voltage',     _j.dumps([f"{_UPS}/OutputVoltage#Reading"])),
+        ('Chassis_InletTemp','Rack Inlet Temperature',  'Gauge',   'PhysicalSensor', 'Decimal', 'Cel',  0.0,   60.0, 'Intake',      'Temperature', _j.dumps([f"{_CHS}/Temp1#Reading"])),
+        ('Chassis_MidTemp',  'Rack Middle Temperature', 'Gauge',   'PhysicalSensor', 'Decimal', 'Cel',  0.0,   60.0, 'SystemBoard', 'Temperature', _j.dumps([f"{_CHS}/Temp2#Reading"])),
+        ('Chassis_OutTemp',  'Rack Outlet Temperature', 'Gauge',   'PhysicalSensor', 'Decimal', 'Cel',  0.0,   65.0, 'Exhaust',     'Temperature', _j.dumps([f"{_CHS}/Temp3#Reading"])),
+        ('Chassis_TopTemp',  'Rack Top Temperature',    'Gauge',   'PhysicalSensor', 'Decimal', 'Cel',  0.0,   65.0, 'Exhaust',     'Temperature', _j.dumps([f"{_CHS}/Temp4#Reading"])),
+        ('Chassis_Humidity1','Rack Humidity 1',         'Gauge',   'PhysicalSensor', 'Decimal', '%',    0.0,  100.0, 'Ambient',     'Humidity',    _j.dumps([f"{_CHS}/Humidity1#Reading"])),
+        ('Chassis_Humidity2','Rack Humidity 2',         'Gauge',   'PhysicalSensor', 'Decimal', '%',    0.0,  100.0, 'Ambient',     'Humidity',    _j.dumps([f"{_CHS}/Humidity2#Reading"])),
+        ('Chassis_Power',    'Rack Total Power',        'Gauge',   'PhysicalSensor', 'Decimal', 'W',    0.0,10000.0, 'SystemBoard', 'PowerWatts',  _j.dumps([f"{_CHS}/TotalPower#Reading"])),
+    ])
     conn.commit()

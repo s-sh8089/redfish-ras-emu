@@ -24,6 +24,18 @@ _CSDL = """\
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/EventService_v1.xml">
     <edmx:Include Namespace="EventService.v1_10_0"/>
   </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/TelemetryService_v1.xml">
+    <edmx:Include Namespace="TelemetryService.v1_3_3"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/MetricDefinition_v1.xml">
+    <edmx:Include Namespace="MetricDefinition.v1_3_0"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/MetricReportDefinition_v1.xml">
+    <edmx:Include Namespace="MetricReportDefinition.v1_4_2"/>
+  </edmx:Reference>
+  <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/MetricReport_v1.xml">
+    <edmx:Include Namespace="MetricReport.v1_5_0"/>
+  </edmx:Reference>
   <edmx:Reference Uri="http://redfish.dmtf.org/schemas/v1/LogService_v1.xml">
     <edmx:Include Namespace="LogService.v1_4_0"/>
   </edmx:Reference>
@@ -74,5 +86,6 @@ def odata_service_document():
             {"name": "Chassis", "kind": "EntitySet", "url": "/redfish/v1/Chassis"},
             {"name": "Managers", "kind": "EntitySet", "url": "/redfish/v1/Managers"},
             {"name": "EventService", "kind": "Singleton", "url": "/redfish/v1/EventService"},
+            {"name": "TelemetryService", "kind": "Singleton", "url": "/redfish/v1/TelemetryService"},
         ],
     }

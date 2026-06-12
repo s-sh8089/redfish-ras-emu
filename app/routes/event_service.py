@@ -4,7 +4,7 @@ import sqlite3
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -12,7 +12,16 @@ from app import config
 from app.auth import unauthorized_response, validate_token
 from app.database import get_db
 from app.event_dispatcher import dispatch_event
-from app.helpers import bad_request_response, created_response, no_content_response, not_found_response, odata_pagination
+from app.helpers import (
+    bad_request_response,
+    check_etag,
+    compute_etag,
+    created_response,
+    no_content_response,
+    not_found_response,
+    odata_pagination,
+    precondition_failed_response,
+)
 from app.sse_manager import sse_manager
 
 router = APIRouter()
@@ -103,10 +112,53 @@ def create_subscription(body: SubscriptionCreate, db: sqlite3.Connection = Depen
 
 
 @router.get("/redfish/v1/EventService/Subscriptions/{sub_id}")
-def subscription(sub_id: str, db: sqlite3.Connection = Depends(get_db)):
+def subscription(sub_id: str, response: Response, db: sqlite3.Connection = Depends(get_db)):
     row = db.execute("SELECT * FROM event_subscriptions WHERE id=?", (sub_id,)).fetchone()
     if not row:
         return not_found_response(f"Subscription {sub_id}")
+    data = _subscription_resource(row)
+    response.headers["ETag"] = f'"{compute_etag(data)}"'
+    return data
+
+
+class SubscriptionPatch(BaseModel):
+    Name: Optional[str] = None
+    Context: Optional[str] = None
+    EventTypes: Optional[List[str]] = None
+
+
+@router.patch("/redfish/v1/EventService/Subscriptions/{sub_id}")
+def patch_subscription(
+    sub_id: str,
+    body: SubscriptionPatch,
+    request: Request,
+    db: sqlite3.Connection = Depends(get_db),
+):
+    row = db.execute("SELECT * FROM event_subscriptions WHERE id=?", (sub_id,)).fetchone()
+    if not row:
+        return not_found_response(f"Subscription {sub_id}")
+
+    current = _subscription_resource(row)
+    if not check_etag(request.headers.get("If-Match"), compute_etag(current)):
+        return precondition_failed_response()
+
+    updates = {}
+    if body.Name is not None:
+        updates["name"] = body.Name
+    if body.Context is not None:
+        updates["context"] = body.Context
+    if body.EventTypes is not None:
+        updates["event_types"] = json.dumps(body.EventTypes)
+
+    if updates:
+        set_clause = ", ".join(f"{k}=?" for k in updates)
+        db.execute(
+            f"UPDATE event_subscriptions SET {set_clause} WHERE id=?",
+            (*updates.values(), sub_id),
+        )
+        db.commit()
+
+    row = db.execute("SELECT * FROM event_subscriptions WHERE id=?", (sub_id,)).fetchone()
     return _subscription_resource(row)
 
 

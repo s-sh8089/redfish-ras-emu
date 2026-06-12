@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -8,6 +9,10 @@ import requests
 
 from app import config
 from app.sse_manager import sse_manager
+
+_CHASSIS_ORIGIN_RE = re.compile(r"^/redfish/v1/Chassis/([^/]+)/")
+_PDU_ORIGIN_RE = re.compile(r"^/redfish/v1/PowerEquipment/RackPDUs/([^/]+)/")
+_UPS_ORIGIN_RE = re.compile(r"^/redfish/v1/PowerEquipment/UPSs/([^/]+)/")
 
 
 def dispatch_event(
@@ -27,11 +32,23 @@ def dispatch_event(
         subs = conn.execute(
             "SELECT * FROM event_subscriptions WHERE status_state='Enabled'"
         ).fetchall()
-        conn.execute(
-            """INSERT INTO log_entries (id, owner_type, owner_id, created, entry_type, severity, message, origin_of_condition)
-               VALUES (?, 'manager', 'BMC', ?, ?, ?, ?, ?)""",
-            (event_id, timestamp, event_type, severity, message, origin_of_condition),
-        )
+
+        _write_log_entry(conn, event_id, 'manager', 'BMC', timestamp, event_type, severity, message, origin_of_condition)
+
+        for pattern, owner_type in (
+            (_CHASSIS_ORIGIN_RE, 'chassis'),
+            (_PDU_ORIGIN_RE, 'pdu'),
+            (_UPS_ORIGIN_RE, 'ups'),
+        ):
+            m = pattern.match(origin_of_condition)
+            if m:
+                owner_id = m.group(1)
+                if conn.execute(
+                    "SELECT 1 FROM log_services WHERE owner_type=? AND owner_id=?",
+                    (owner_type, owner_id),
+                ).fetchone():
+                    _write_log_entry(conn, event_id, owner_type, owner_id, timestamp, event_type, severity, message, origin_of_condition)
+
         conn.commit()
     finally:
         conn.close()
@@ -80,6 +97,45 @@ def dispatch_event(
         }
 
         _deliver_with_retry(sub["destination"], payload)
+
+
+def _write_log_entry(
+    conn: sqlite3.Connection,
+    event_id: str,
+    owner_type: str,
+    owner_id: str,
+    timestamp: str,
+    entry_type: str,
+    severity: str,
+    message: str,
+    origin_of_condition: str,
+) -> None:
+    conn.execute(
+        """INSERT INTO log_entries
+               (id, owner_type, owner_id, created, entry_type, severity, message, origin_of_condition)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (event_id, owner_type, owner_id, timestamp, entry_type, severity, message, origin_of_condition),
+    )
+
+    ls_row = conn.execute(
+        "SELECT max_number_of_records, overwrite_policy FROM log_services WHERE owner_type=? AND owner_id=?",
+        (owner_type, owner_id),
+    ).fetchone()
+    if ls_row and ls_row["overwrite_policy"] == "WrapsWhenFull":
+        max_records = ls_row["max_number_of_records"]
+        count = conn.execute(
+            "SELECT COUNT(*) FROM log_entries WHERE owner_type=? AND owner_id=?",
+            (owner_type, owner_id),
+        ).fetchone()[0]
+        if count > max_records:
+            excess = count - max_records
+            conn.execute(
+                """DELETE FROM log_entries WHERE rowid IN (
+                       SELECT rowid FROM log_entries
+                       WHERE owner_type=? AND owner_id=?
+                       ORDER BY created ASC LIMIT ?)""",
+                (owner_type, owner_id, excess),
+            )
 
 
 def _deliver_with_retry(destination: str, payload: dict) -> None:

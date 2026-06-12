@@ -51,6 +51,7 @@ def _pdu_resource(row, db: sqlite3.Connection) -> dict:
         "Outlets": {"@odata.id": f"{base}/Outlets"},
         "Sensors": {"@odata.id": f"{base}/Sensors"},
         "Metrics": {"@odata.id": f"{base}/Metrics"},
+        "LogServices": {"@odata.id": f"{base}/LogServices"},
     }
     if row["location_info"]:
         resource["Location"] = json.loads(row["location_info"])
